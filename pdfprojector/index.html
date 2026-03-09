@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Slide Projector Simulator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .container { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 1000px; width: 100%; }
+        .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #ddd; }
+        .control-group { display: flex; flex-direction: column; }
+        .viewer { display: flex; flex-direction: column; align-items: center; gap: 20px; margin-top: 20px; }
+        canvas { max-width: 100%; height: auto; border: 1px solid #333; background: #000; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        label { font-weight: bold; font-size: 0.85em; margin-bottom: 5px; color: #333; }
+        button { padding: 8px 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+        button:disabled { background: #ccc; }
+        input[type="range"] { cursor: pointer; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>PDF Projector Simulator</h2>
+    <p>PDFを読み込み、プロジェクター特有の劣化をシミュレートします。</p>
+    
+    <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+        <input type="file" id="upload" accept="application/pdf">
+        <div id="nav-controls" style="display:none;">
+            <button id="prev">前へ</button>
+            <span id="page-num-display">Page: <span id="page_num">0</span> / <span id="page_count">0</span></span>
+            <button id="next">次へ</button>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <label>照明の映り込み (黒浮き)</label>
+            <input type="range" id="washout" min="0" max="150" value="40">
+        </div>
+        <div class="control-group">
+            <label>色のあせ具合 (彩度)</label>
+            <input type="range" id="saturation" min="0" max="100" value="50">
+        </div>
+        <div class="control-group">
+            <label>ピントのボケ</label>
+            <input type="range" id="blur" min="0" max="8" step="0.2" value="1.2">
+        </div>
+        <div class="control-group">
+            <label>解像度の低下 (ドット感)</label>
+            <input type="range" id="pixelate" min="1" max="10" step="0.5" value="1">
+        </div>
+    </div>
+
+    <div class="viewer">
+        <canvas id="the-canvas"></canvas>
+    </div>
+</div>
+
+<script>
+    const pdfjsLib = window['pdfjs-dist/build/pdf'];
+    // workerのURLを確実に指定
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    let pdfDoc = null,
+        pageNum = 1,
+        pageRendering = false,
+        pageNumPending = null,
+        scale = 2, 
+        canvas = document.getElementById('the-canvas'),
+        ctx = canvas.getContext('2d');
+
+    const getParam = (id) => parseFloat(document.getElementById(id).value);
+
+    function renderPage(num) {
+        pageRendering = true;
+        pdfDoc.getPage(num).then((page) => {
+            const viewport = page.getViewport({scale: scale});
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            // 文字欠落対策のため、レンダリング時にcanvasをクリアし、
+            // 背景を白（スライドの基本色）に設定
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const renderContext = {
+                canvasContext: ctx,
+                viewport: viewport,
+                // 高品質なテキスト描画設定
+                intent: 'print' 
+            };
+            
+            const renderTask = page.render(renderContext);
+            renderTask.promise.then(() => {
+                applyEffects(); 
+                pageRendering = false;
+                if (pageNumPending !== null) {
+                    renderPage(pageNumPending);
+                    pageNumPending = null;
+                }
+            }).catch(err => {
+                console.error("Render error:", err);
+            });
+        });
+        document.getElementById('page_num').textContent = num;
+    }
+
+    function applyEffects() {
+        if (!canvas.width) return;
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = canvas.width;
+        tempCanvas.height = canvas.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(canvas, 0, 0);
+
+        const washout = getParam('washout');
+        const sat = 100 - getParam('saturation');
+        const blur = getParam('blur');
+        const pixelScale = 1 / getParam('pixelate');
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 1. ドット感
+        if (pixelScale < 1) {
+            const pCanvas = document.createElement('canvas');
+            pCanvas.width = Math.max(1, canvas.width * pixelScale);
+            pCanvas.height = Math.max(1, canvas.height * pixelScale);
+            const pCtx = pCanvas.getContext('2d');
+            pCtx.drawImage(tempCanvas, 0, 0, pCanvas.width, pCanvas.height);
+            
+            ctx.imageSmoothingEnabled = false; 
+            ctx.drawImage(pCanvas, 0, 0, canvas.width, canvas.height);
+            ctx.imageSmoothingEnabled = true; 
+        } else {
+            ctx.drawImage(tempCanvas, 0, 0);
+        }
+
+        // 2. フィルタ（ボケ・彩度）
+        const snapshot = document.createElement('canvas');
+        snapshot.width = canvas.width;
+        snapshot.height = canvas.height;
+        snapshot.getContext('2d').drawImage(canvas, 0, 0);
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.filter = `blur(${blur}px) saturate(${sat}%)`;
+        ctx.drawImage(snapshot, 0, 0);
+
+        // 3. 黒浮き
+        ctx.globalCompositeOperation = 'screen';
+        ctx.fillStyle = `rgb(${washout}, ${washout}, ${washout})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.globalCompositeOperation = 'source-over';
+    }
+
+    document.getElementById('upload').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file || file.type !== 'application/pdf') return;
+        
+        const reader = new FileReader();
+        reader.onload = function() {
+            const typedarray = new Uint8Array(this.result);
+            // 外部フォントの読み込みを許可する設定
+            const loadingTask = pdfjsLib.getDocument({
+                data: typedarray,
+                cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+                cMapPacked: true,
+            });
+
+            loadingTask.promise.then((pdf) => {
+                pdfDoc = pdf;
+                document.getElementById('page_count').textContent = pdf.numPages;
+                document.getElementById('nav-controls').style.display = 'block';
+                pageNum = 1;
+                renderPage(pageNum);
+            });
+        };
+        reader.readAsArrayBuffer(file);
+    });
+
+    ['washout', 'saturation', 'blur', 'pixelate'].forEach(id => {
+        document.getElementById(id).addEventListener('input', () => {
+            if (pdfDoc && !pageRendering) renderPage(pageNum);
+        });
+    });
+
+    document.getElementById('prev').addEventListener('click', () => {
+        if (pageNum <= 1 || pageRendering) return;
+        pageNum--;
+        renderPage(pageNum);
+    });
+
+    document.getElementById('next').addEventListener('click', () => {
+        if (pageNum >= pdfDoc.numPages || pageRendering) return;
+        pageNum++;
+        renderPage(pageNum);
+    });
+</script>
+
+</body>
+</html>
